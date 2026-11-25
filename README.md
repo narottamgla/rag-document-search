@@ -7,6 +7,7 @@ A Streamlit app for asking questions about uploaded PDF and TXT documents. It us
 - Python 3.12 or newer
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/) for dependency and environment management
 - An OpenAI API key
+- Internet access for the Wikipedia fallback
 
 ## Setup
 
@@ -50,10 +51,18 @@ Open the local URL printed by Streamlit (usually <http://localhost:8501>). Using
 1. Upload one or more PDF or TXT files.
 2. Set the chunk size, overlap, and number of sources to retrieve in the sidebar.
 3. Select **Build knowledge base** and wait for document processing and indexing to finish.
-4. Enter a question in the chat box. The app retrieves relevant chunks and uses them to generate a response.
-5. Expand **View retrieved sources** under an answer to inspect the document sections used.
+4. Enter a question in the chat box. The app retrieves relevant chunks and uses them to generate a response. If the best match is below the relevance threshold, it searches Wikipedia for additional context.
+5. Expand **View retrieved sources** under an answer to inspect the document sections used, including Wikipedia articles when they were retrieved.
 
 The knowledge base is held in the running app's session; restarting the app clears it, so upload and index the files again.
+
+## Wikipedia fallback
+
+The app uses LangChain's `WikipediaAPIWrapper` with the `wikipedia` Python package to fetch up to three English Wikipedia articles when the best vector-store relevance score is below `0.4`. The retrieved article summaries are added to the context sent to the selected OpenAI model, alongside any uploaded-document matches. The response indicates when Wikipedia context was included, and the articles appear in **View retrieved sources**.
+
+Wikipedia is a fallback for questions not well covered by uploaded documents; it is not queried for every question. If the lookup fails, the error is logged and the app continues with uploaded-document context only. Wikipedia requests bypass system proxy settings for `en.wikipedia.org` and `*.wikipedia.org`; direct access to Wikipedia must be allowed by your network.
+
+The integration is implemented in `streamlit_app.py`. Its `wikipedia>=1.4.0` dependency is declared in `pyproject.toml` and `requirements.txt` and included in `uv.lock`.
 
 ## High-level architecture
 
@@ -70,6 +79,8 @@ flowchart TD
     UI --> SEARCH[Similarity search<br/>top-k chunks]
     VS --> SEARCH
     SEARCH --> CTX[Retrieved chunks + source metadata]
+    SEARCH -->|Best relevance below threshold| WIKI[Wikipedia search]
+    WIKI --> CTX
     CTX --> PROMPT[Context-grounded prompt]
     U -->|OpenAI API key + model| LLM[OpenAI Chat model<br/>gpt-4o-mini or gpt-4o]
     PROMPT --> LLM

@@ -6,21 +6,35 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 import streamlit as st
+import wikipedia
 from dotenv import load_dotenv
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_openai import ChatOpenAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.utilities import WikipediaAPIWrapper
 
 from src.document_injestion.document_processing import DocumentProcessing
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("rag_document_search")
+WIKIPEDIA_FALLBACK_RELEVANCE_THRESHOLD = 0.4
 
 load_dotenv()
 os.environ.setdefault("USER_AGENT", "rag-document-search/1.0")
+wikipedia.set_user_agent(os.environ["USER_AGENT"])
+
+no_proxy_hosts = {
+    host.strip()
+    for value in (os.environ.get("no_proxy", ""), os.environ.get("NO_PROXY", ""))
+    for host in value.split(",")
+    if host.strip()
+}
+no_proxy_hosts.update({"en.wikipedia.org", ".wikipedia.org"})
+os.environ["NO_PROXY"] = ",".join(sorted(no_proxy_hosts))
+os.environ["no_proxy"] = os.environ["NO_PROXY"]
 
 st.set_page_config(
     page_title="RAG Document Search",
@@ -114,20 +128,26 @@ def answer_question(question, vector_store, api_key, model_name, result_count):
     )
     retrieval_started = time.perf_counter()
     try:
-        retrieved_docs = vector_store.similarity_search(question, k=result_count)
+        scored_docs = vector_store.similarity_search_with_relevance_scores(
+            question,
+            k=result_count,
+        )
     except Exception:
         logger.exception("Vector-store retrieval failed")
         raise
     retrieval_duration = time.perf_counter() - retrieval_started
+    retrieved_docs = [document for document, _ in scored_docs]
+    best_relevance = max((score for _, score in scored_docs), default=0.0)
 
     sources = [
         document.metadata.get("source", "Unknown source")
         for document in retrieved_docs
     ]
     logger.info(
-        "Vector-store retrieval completed in %.3f seconds: %d chunk(s); sources: %s",
+        "Vector-store retrieval completed in %.3f seconds: %d chunk(s), best relevance %.3f; sources: %s",
         retrieval_duration,
         len(retrieved_docs),
+        best_relevance,
         ", ".join(sources),
     )
     add_activity(f"Retrieved {len(retrieved_docs)} chunk(s) for the query")
@@ -141,14 +161,37 @@ def answer_question(question, vector_store, api_key, model_name, result_count):
             len(document.page_content),
         )
 
+    wikipedia_docs = []
+    wikipedia_error = None
+    if best_relevance < WIKIPEDIA_FALLBACK_RELEVANCE_THRESHOLD:
+        logger.info(
+            "Best vector-store match is below %.2f; searching Wikipedia",
+            WIKIPEDIA_FALLBACK_RELEVANCE_THRESHOLD,
+        )
+        try:
+            wikipedia_docs = WikipediaAPIWrapper(
+                top_k_results=3,
+                lang="en",
+                doc_content_chars_max=4000,
+            ).load(question)
+            logger.info("Wikipedia returned %d document(s)", len(wikipedia_docs))
+            add_activity(f"Wikipedia returned {len(wikipedia_docs)} result(s)")
+        except Exception as exc:
+            logger.exception("Wikipedia fallback search failed")
+            wikipedia_error = str(exc)
+            add_activity(f"Wikipedia fallback failed: {exc}")
+
+    all_context_docs = retrieved_docs + wikipedia_docs
     context = "\n\n".join(
-        f"Source {index}: {doc.page_content}"
-        for index, doc in enumerate(retrieved_docs, start=1)
+        f"Source {index} ({doc.metadata.get('source', 'Unknown source')}): "
+        f"{doc.page_content}"
+        for index, doc in enumerate(all_context_docs, start=1)
     )
 
     prompt = f"""You are a test-case generation assistant.
-Use only the provided context to answer the question.
-If the context is insufficient, say that clearly. Do not invent requirements.
+Use the uploaded knowledge-base sources as the primary source for answers.
+If they do not contain enough information, use Wikipedia sources when provided.
+If the available context is insufficient, say so clearly. Do not invent facts.
 
 Context:
 {context}
@@ -165,7 +208,18 @@ Provide a clear, practical answer."""
     )
     answer = llm.invoke(prompt)
 
-    return answer.content, retrieved_docs
+    if wikipedia_error:
+        answer_text = (
+            f"{answer.content}\n\n"
+            f"*Wikipedia lookup failed; this answer uses uploaded documents only "
+            f"({wikipedia_error}).*"
+        )
+    elif wikipedia_docs:
+        answer_text = f"{answer.content}\n\n*Additional context retrieved from Wikipedia.*"
+    else:
+        answer_text = answer.content
+
+    return answer_text, all_context_docs
 
 
 if "messages" not in st.session_state:
