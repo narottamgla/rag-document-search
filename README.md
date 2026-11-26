@@ -66,26 +66,6 @@ The integration is implemented in `streamlit_app.py`. Its `wikipedia>=1.4.0` dep
 
 ## High-level architecture
 
-```mermaid
-flowchart TD
-    U[User] -->|Uploads PDF or TXT| UI[Streamlit UI]
-    UI --> TMP[Temporary uploaded files]
-    TMP --> LOAD[DocumentProcessing<br/>PDF/TXT extraction]
-    LOAD --> SPLIT[Recursive text splitting<br/>configurable chunk size/overlap]
-    SPLIT --> EMB[Hugging Face embeddings<br/>all-MiniLM-L6-v2]
-    EMB --> VS[Chroma vector store<br/>in-memory session index]
-
-    U -->|Question| UI
-    UI --> SEARCH[Similarity search<br/>top-k chunks]
-    VS --> SEARCH
-    SEARCH --> CTX[Retrieved chunks + source metadata]
-    SEARCH -->|Best relevance below threshold| WIKI[Wikipedia search]
-    WIKI --> CTX
-    CTX --> PROMPT[Context-grounded prompt]
-    U -->|OpenAI API key + model| LLM[OpenAI Chat model<br/>gpt-4o-mini or gpt-4o]
-    PROMPT --> LLM
-    LLM --> ANSWER[Answer and retrieved sources]
-    ANSWER --> UI
-```
+![RAG Document Search workflow: document ingestion, vector indexing, question answering, and Wikipedia fallback](assets/rag-document-search-workflow.png)
 
 The Streamlit app currently performs the end-to-end indexing and question-answering flow directly in `streamlit_app.py`. `src/document_injestion/` contains reusable document loaders; `src/vector_store/`, `src/nodes/`, `src/state/`, and `src/graph_builder/` contain supporting vector-store and LangGraph workflow modules.
